@@ -1,9 +1,27 @@
 import math
 import sys
 import time
+from functools import wraps
 
 import cv2 as cv
 import numpy as np
+
+
+def timeit(before, after):
+    def wrap(f):
+        @wraps(f)
+        def wrapped_f(*args, **kwargs):
+            print(before)
+            start_time = time.time()
+            res = f(*args, **kwargs)
+            end_time = time.time()
+            print(after)
+            print(f"Took {end_time-start_time} seconds")
+            return res
+
+        return wrapped_f
+
+    return wrap
 
 
 class Looper:
@@ -17,9 +35,18 @@ class Looper:
         cv.destroyAllWindows()
         return
 
+    @timeit("Reading video file...", "Done reading video file...")
     def read_video(self):
+        """
+        reads video frame by frame and stores each frame in self.frame_buf
+        as well as calculates optical flow and stores in self.flow_buf. Also
+        saves some data about video that is needed later. All frames are
+        downsampled by a factor of .4 using cubic interpolation.
+        """
+
         cap = cv.VideoCapture(self.src)
 
+        # read first frame for optical flow calcs + frame size/count
         fc = 0
         ret, frame = cap.read()
         prev = cv.resize(
@@ -55,6 +82,8 @@ class Looper:
                 interpolation=cv.INTER_CUBIC,
             )
             self.frame_buf[fc] = curr
+
+            # convert to graysale and calc optical flow
             gray = cv.cvtColor(curr, cv.COLOR_BGR2GRAY)
             flow = cv.calcOpticalFlowFarneback(
                 prevgray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
@@ -63,7 +92,7 @@ class Looper:
             prevgray = gray
             fc += 1
 
-            cv.imshow("flow", self.draw_flow(gray, flow))
+            # cv.imshow("flow", self.draw_flow(gray, flow))
 
             ch = cv.waitKey(5)
             if ch == 27:
