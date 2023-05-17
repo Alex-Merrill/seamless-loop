@@ -1,5 +1,5 @@
-import os
 import argparse
+import os
 
 import looper
 
@@ -12,23 +12,29 @@ def parse_args():
     """
 
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('-mind', '--min_duration',
-                            help='minimum duration of final loop',
-                            type=int)
-    arg_parser.add_argument('-maxd', '--max_duration',
-                            help='maximum duration of final loop',
-                            type=int)
-    arg_parser.add_argument('path', help='path to video file')
+    arg_parser.add_argument(
+        "-mind",
+        "--min-duration",
+        help="minimum duration of final loop",
+        type=int,
+    )
+    arg_parser.add_argument(
+        "-maxd",
+        "--max-duration",
+        help="maximum duration of final loop",
+        type=int,
+    )
+    arg_parser.add_argument("source", help="path to video source")
 
-    arg_parser = parse_args()
-    path = arg_parser.path
-    min_d = arg_parser.min_duration if arg_parser.min_duration else 3
-    max_d = arg_parser.max_duration if arg_parser.max_duration else 5
+    args = arg_parser.parse_args()
+    src = args.source
+    min_d = args.min_duration if args.min_duration else 3
+    max_d = args.max_duration if args.max_duration else 5
 
-    if not os.path.isfile(path):
-        raise FileNotFoundError("file not found, check path")
+    if not os.path.isfile(src):
+        raise FileNotFoundError("file not found, check source")
 
-    return min_d, max_d, path
+    return min_d, max_d, src
 
 
 def main():
@@ -36,8 +42,8 @@ def main():
     Gets input args and passes them to looper, starts algorithm.
     """
 
-    min_d, max_d, path = parse_args()
-    loop = looper.Looper(min_d, max_d, path)
+    min_d, max_d, src = parse_args()
+    loop = looper.Looper(min_d, max_d, src)
     loop.Start()
 
 
