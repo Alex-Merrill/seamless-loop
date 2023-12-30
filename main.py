@@ -24,17 +24,31 @@ def parse_args():
         help="maximum duration of final loop",
         type=int,
     )
+    arg_parser.add_argument(
+        "-g",
+        "--grayscale",
+        help="process video in grayscale",
+        action="store_true",
+    )
+    arg_parser.add_argument(
+        "-r",
+        "--redmean",
+        help="use redmean color difference",
+        action="store_true",
+    )
     arg_parser.add_argument("source", help="path to video source")
 
     args = arg_parser.parse_args()
     src = args.source
     min_d = args.min_duration if args.min_duration else 3
     max_d = args.max_duration if args.max_duration else 5
+    gray = args.grayscale
+    redmean = args.redmean
 
     if not os.path.isfile(src):
         raise FileNotFoundError("file not found, check source")
 
-    return min_d, max_d, src
+    return min_d, max_d, gray, redmean, src
 
 
 def main():
@@ -42,8 +56,8 @@ def main():
     Gets input args and passes them to looper, starts algorithm.
     """
 
-    min_d, max_d, src = parse_args()
-    loop = looper.Looper(min_d, max_d, src)
+    min_d, max_d, gray, redmean, src = parse_args()
+    loop = looper.Looper(min_d, max_d, gray, redmean, src)
     loop.Start()
 
 

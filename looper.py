@@ -1,13 +1,16 @@
-import math
+import multiprocessing
+import os
+import shutil
 import sys
 import time
 from functools import wraps
 
+import colour
 import cv2 as cv
 import numpy as np
 
 
-def timeit(action, finish, include_id=False):
+def timeit(action, include_id=False, end_line=False):
     """
     decorator to print time taken to run function
 
@@ -17,13 +20,16 @@ def timeit(action, finish, include_id=False):
     def wrap(f):
         @wraps(f)
         def wrapped_f(*args, **kwargs):
-            test = f" {args[1]}" if include_id else ""
-            test = args[1] if include_id else ""
-            print(f"{action} {test}")
-            start_time = time.time()
+            endline = "\n" if end_line else ""
+            id = f" {args[1]}" if include_id else ""
+            print(f"{action}{id}")
+            start_time = time.perf_counter()
             res = f(*args, **kwargs)
-            end_time = time.time()
-            print(f"Done {finish}{test}! Took {end_time - start_time} seconds")
+            elapsed = time.perf_counter() - start_time
+            print(
+                f"Done {action[0].lower()}{action[1:]}{id}!"
+                f" Took {round(elapsed, 4)} seconds{endline}"
+            )
             return res
 
         return wrapped_f
@@ -32,25 +38,49 @@ def timeit(action, finish, include_id=False):
 
 
 class Looper:
-    def __init__(self, min_duration, max_duration, src):
+    def __init__(self, min_duration, max_duration, gray, redmean, src):
         self.min_duration = min_duration
         self.max_duration = max_duration
         self.src = src
+        self.gray = gray
+        self.redmean = redmean
         self.DOWNSAMPLE_FACTOR = 0.25
+        self.get_frame_pixel_diff = None
+        if self.gray:
+            self.get_frame_pixel_diff = self.get_frame_pixel_diff_gray
+        else:
+            if not self.redmean:
+                self.get_frame_pixel_diff = self.get_frame_pixel_diff_color_sci
+            else:
+                self.get_frame_pixel_diff = (
+                    self.get_frame_pixel_diff_color_redmean
+                )
+
+        print(
+            "Initializing loop calculations...\n"
+            f"Minimum loop duration: {self.min_duration}\n"
+            f"Maximum loop duration: {self.max_duration}\n"
+            f"Grayscale mode: {'Active' if self.gray else 'Disabled'}\n"
+            f"Color difference method: {'Euc. dist.' if self.gray else 'Redmean' if self.redmean else 'CIE 2000'}\n"
+            f"Source file: {self.src}\n"
+        )
 
     def Start(self):
         self.read_video()
         cv.destroyAllWindows()
-        self.getAllFrameDiffs()
+        self.get_all_frame_diffs()
+        self.get_best_loop()
+        self.write_best_loop()
         return
 
-    @timeit("Reading video file...", "reading video file")
+    @timeit("Reading video file", end_line=True)
     def read_video(self):
         """
-        reads video frame by frame and stores each frame in self.frame_buf
-        as well as calculates optical flow and stores in self.flow_buf. Also
-        saves some data about video that is needed later. All frames are
-        downsampled by a factor of .4 using cubic interpolation.
+        reads video frames and stores each color frame in self.frame_buf_c
+        and each gray scale frame in self.frame_buf_g as well as calculates
+        optical flow and stores in self.flow_buf. Also saves some data about
+        video that is needed later. All frames are downsampled by a factor
+        of .4 using cubic interpolation.
         """
 
         cap = cv.VideoCapture(self.src)
@@ -65,20 +95,33 @@ class Looper:
             fy=self.DOWNSAMPLE_FACTOR,
             interpolation=cv.INTER_CUBIC,
         )
-        prevgray = cv.cvtColor(prev, cv.COLOR_BGR2GRAY)
+        prev_gray = cv.cvtColor(prev, cv.COLOR_BGR2GRAY)
+
         self.frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
         self.fps = int(cap.get(cv.CAP_PROP_FPS))
         self.frame_width = prev.shape[1]
         self.frame_height = prev.shape[0]
-        self.frame_buf = np.empty(
-            (self.frame_count, self.frame_height, self.frame_width, 3),
-            np.dtype("float"),
+        print(
+            "Video Data:\n"
+            f"Frame count: {self.frame_count}\n"
+            f"FPS: {self.fps}\n"
+            f"Frame Width: {self.frame_width}\n"
+            f"Frame Height: {self.frame_height}"
         )
-        self.frame_buf[fc] = prev
+
+        self.frame_buf_c = np.empty(
+            (self.frame_count, *prev.shape), np.dtype("float32")
+        )
+        self.frame_buf_g = np.empty(
+            (self.frame_count, *prev_gray.shape), np.dtype("float32")
+        )
         self.flow_buf = np.empty(
             (self.frame_count, self.frame_height, self.frame_width, 2),
-            np.dtype("float"),
+            np.dtype("float32"),
         )
+
+        self.frame_buf_c[fc] = prev
+        self.frame_buf_g[fc] = prev_gray
         fc += 1
 
         while fc < self.frame_count and ret:
@@ -90,15 +133,25 @@ class Looper:
                 fy=self.DOWNSAMPLE_FACTOR,
                 interpolation=cv.INTER_CUBIC,
             )
-            self.frame_buf[fc] = curr
+            curr = cv.cvtColor(curr, cv.COLOR_BGR2RGB)
+            curr_gray = cv.cvtColor(curr, cv.COLOR_RGB2GRAY)
+            self.frame_buf_c[fc] = curr
+            self.frame_buf_g[fc] = curr_gray
 
-            # convert to graysale and calc optical flow
-            gray = cv.cvtColor(curr, cv.COLOR_BGR2GRAY)
+            # calc optical flow
             flow = cv.calcOpticalFlowFarneback(
-                prevgray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+                self.frame_buf_g[fc - 1],
+                self.frame_buf_g[fc],
+                None,
+                0.5,
+                3,
+                15,
+                3,
+                5,
+                1.2,
+                0,
             )
             self.flow_buf[fc] = flow
-            prevgray = gray
             fc += 1
 
             # cv.imshow("flow", self.draw_flow(gray, flow))
@@ -109,43 +162,121 @@ class Looper:
 
         cap.release()
 
-    @timeit("Getting all frame pixel diffs...", "getting all frame pixel diffs")
-    def getAllFrameDiffs(self):
-        frame_diffs = np.empty(
-            (self.frame_count, self.frame_count), np.dtype("float")
+    @timeit("Calculating best loop frames")
+    def get_best_loop(self):
+        best_per_fc = [(float("infinity"), -1, -1)] * (
+            self.fps * self.max_duration + 1
         )
+        for f1, f1_diffs in enumerate(self.frame_diffs):
+            for f2, diff in enumerate(f1_diffs):
+                if diff == 0:
+                    continue
+                fc = f2 - f1 + 1
+                if diff < best_per_fc[fc][0]:
+                    best_per_fc[fc] = (diff, f1, f2)
+                # print(f"({f1},{f2}): { diff }")
+
+        best_overall = (float("infinity"), -1, -1)
+        for i, diff in enumerate(best_per_fc):
+            if diff[0] != float("infinity"):
+                print(f"fc: {i} | diff: {diff}")
+                if diff[0] < best_overall[0]:
+                    best_overall = diff
+
+        print(f"best overall: {best_overall}")
+
+        self.best_start = best_overall[1]
+        self.best_end = best_overall[2]
+
+    def write_best_loop(self):
+        """
+        writes gif to project dir of best loop found
+        """
+
+        # clean up any previous tmp dir and gif
+        tmp_dir = "./tmp_images"
+        if os.path.exists(tmp_dir) and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        if os.path.exists("./output.gif"):
+            os.remove("./output.gif")
+        os.makedirs(tmp_dir)
+
+        # writes frames to tmp dir and saves paths
+        # TODO: just read from actual video to get full res frames
+        image_paths = []
+        for i in range(self.best_start, self.best_end + 1):
+            output_filename = str(i)
+            while len(output_filename) < 3:
+                output_filename = "0" + output_filename
+            output_filename += ".png"
+            im_path = os.path.join(tmp_dir, output_filename)
+            image_paths.append(im_path)
+            cv.imwrite(im_path, self.frame_buf_c[i])
+
+        # use imagemagick to create gif from frames
+        delay = 1 / self.fps
+        loop = 0
+        output_path = "./output.gif"
+        cmd = f"convert -delay {delay} {' '.join(image_paths)} -loop {loop} {output_path}"
+        os.system(cmd)
+
+        # cleanup tmp dir
+        if os.path.exists(tmp_dir) and os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir)
+
+    @timeit("Getting all frame pixel diffs")
+    def get_all_frame_diffs(self):
+        """
+        calculates all frame pixel differences for valid frames to be
+        considered in the loop
+
+        returns array where frame_diffs[i] = [avg_diff(i,0),...,avg_diff(i,n)]
+        """
+        self.frame_diffs = []
 
         last_frame_eligible = self.frame_count - (self.fps * self.min_duration)
-        for i in range(last_frame_eligible):
-            frame_diffs[i] = self.getFrameDiffs(i)
+        pool = multiprocessing.Pool()
+        res = pool.map(
+            self.get_frame_diffs, list(range(last_frame_eligible + 1))
+        )
 
-        return frame_diffs
+        for diff in res:
+            self.frame_diffs.append(diff)
 
     @timeit(
         "Getting pixel diffs for frame",
-        "getting pixel diffs for frame",
         include_id=True,
     )
-    def getFrameDiffs(self, idx):
-        diffs = [0] * len(self.frame_buf)
-        for i in range(idx + 1, len(self.frame_buf)):
-            diffs[i] = self.getFramePixelDiff(
-                self.frame_buf[idx], self.frame_buf[i]
-            )
+    def get_frame_diffs(self, idx):
+        """
+        calculates average redmean pixel difference for frame idx and every
+        other valid frame considering the min and max loop duration
+
+        returns an array where diffs[i] = avg pixel difference between
+        frame[idx] and frame[i]
+        """
+        diffs = [0] * self.frame_count
+
+        first_frame_eligible = idx + (self.fps * self.min_duration) - 1
+        last_frame_eligible = idx + (self.fps * self.max_duration) - 1
+        last_frame_eligible = min(last_frame_eligible, self.frame_count - 1)
+        for i in range(first_frame_eligible, last_frame_eligible + 1):
+            diffs[i] = self.get_frame_pixel_diff(idx, i)
 
         return diffs
 
-    def getFramePixelDiff(self, f1, f2):
+    def get_frame_pixel_diff_color_redmean(self, f1_idx, f2_idx):
         """
         calculates redmean pixel difference for each pixel in frames f1 and f2
 
         returns average redmean difference for all pixels in frame
         """
+        f1, f2 = self.frame_buf_c[f1_idx], self.frame_buf_c[f2_idx]
         total_diff = 0.0
-        for row in range(len(f1)):
-            for col in range(len(f1[0])):
-                rgb1 = f1[row][col]
-                rgb2 = f2[row][col]
+        for row in range(self.frame_height):
+            for col in range(self.frame_width):
+                rgb1 = f1[row, col]
+                rgb2 = f2[row, col]
                 r1 = rgb1[0]
                 g1 = rgb1[1]
                 b1 = rgb1[2]
@@ -158,14 +289,43 @@ class Looper:
                 dB = b1 - b2
                 dG = g1 - g2
 
-                p1 = (2 + rBar / 256) * dR**2
-                p2 = 4 * dG**2
-                p3 = (2 + (255 - rBar) / 256) * dB**2
+                p1 = (2 + rBar / 256) * dR * dR
+                p2 = 4 * dG * dG
+                p3 = (2 + (255 - rBar) / 256) * dB * dB
 
                 squared_diff = p1 + p2 + p3
                 total_diff += squared_diff
 
-        total_diff /= len(f1) * len(f1[0])
+        total_diff /= self.frame_width * self.frame_height
+
+        return total_diff
+
+    def get_frame_pixel_diff_color_sci(self, f1_idx, f2_idx):
+        """
+        calculates CIE 2000 color difference between two frames
+
+        returns average redmean difference for all pixels in frame
+        """
+        f1, f2 = self.frame_buf_c[f1_idx], self.frame_buf_c[f2_idx]
+        f1_lab = cv.cvtColor(f1, cv.COLOR_RGB2Lab)
+        f2_lab = cv.cvtColor(f2, cv.COLOR_RGB2Lab)
+        delta_e = colour.delta_E(f1_lab, f2_lab, method="CIE 2000")
+        avg_dist = np.mean(delta_e)
+        return avg_dist
+
+    def get_frame_pixel_diff_gray(self, f1_idx, f2_idx):
+        """
+        calculates grayscale pixel difference for each pixel in frames f1 and f2
+
+        returns average grayscale difference for all pixels in frame
+        """
+        f1, f2 = self.frame_buf_g[f1_idx], self.frame_buf_g[f2_idx]
+        total_diff = 0.0
+        for row in range(self.frame_height):
+            for col in range(self.frame_width):
+                total_diff += abs(f1[row, col] - f2[row, col])
+
+        total_diff /= self.frame_width * self.frame_height
 
         return total_diff
 
