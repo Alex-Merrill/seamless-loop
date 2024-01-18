@@ -4,7 +4,7 @@ import shutil
 import time
 from functools import wraps
 
-import colour
+from delta_e import delta_E_CIE2000
 import cv2 as cv
 import numpy as np
 
@@ -52,7 +52,7 @@ class Looper:
         if self.gray:
             self.get_frame_pixel_diff = self.get_frame_pixel_diff_gray
         else:
-            if not self.color_diff == "CIE 2000":
+            if self.color_diff == "CIE 2000":
                 self.get_frame_pixel_diff = self.get_frame_pixel_diff_color_CIE
             else:
                 self.get_frame_pixel_diff = self.get_frame_pixel_diff_color_redmean
@@ -96,7 +96,8 @@ class Looper:
             fy=self.DOWNSAMPLE_FACTOR,
             interpolation=cv.INTER_CUBIC,
         )
-        prev_gray = cv.cvtColor(prev, cv.COLOR_BGR2GRAY)
+        prev = cv.cvtColor(prev, cv.COLOR_BGR2RGB)
+        prev_gray = cv.cvtColor(prev, cv.COLOR_RGB2GRAY)
 
         self.frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
         self.fps = int(cap.get(cv.CAP_PROP_FPS))
@@ -291,7 +292,7 @@ class Looper:
         f1, f2 = self.frame_buf_c[f1_idx], self.frame_buf_c[f2_idx]
         f1_lab = cv.cvtColor(f1, cv.COLOR_RGB2Lab)
         f2_lab = cv.cvtColor(f2, cv.COLOR_RGB2Lab)
-        delta_e = colour.delta_E(f1_lab, f2_lab, method="CIE 2000")
+        delta_e = delta_E_CIE2000(f1_lab, f2_lab)
         return np.mean(delta_e)
 
     def get_frame_pixel_diff_gray(self, f1_idx, f2_idx):
