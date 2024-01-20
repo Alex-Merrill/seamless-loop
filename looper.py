@@ -1,8 +1,12 @@
-import multiprocessing
 import os
+import subprocess
 import shutil
+import sys
+import traceback
 import time
 from functools import wraps
+
+from numpy.lib import math
 
 from delta_e import delta_E_CIE2000
 import cv2 as cv
@@ -13,25 +17,61 @@ import numpy as np
 # to calc best frame
 
 
-def timeit(action, include_id=False, end_line=False):
+class bcolors:
+    HEADER = "\033[95m"
+    OKBLUE = "\033[94m"
+    OKCYAN = "\033[96m"
+    OKGREEN = "\033[92m"
+    WARNING = "\033[93m"
+    FAIL = "\033[91m"
+    ENDC = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
+    RESET = "\033[0m"
+
+
+def print_exception(src):
+    e_type, value, tb = sys.exc_info()
+    info, error = traceback.format_exception(e_type, value, tb)[-2:]
+    error = error.strip("\n")
+    print(f"{src}: {bcolors.FAIL}{error}")
+    print(f"[Traceback]:\n {bcolors.FAIL}{info}")
+
+
+def timeit(
+    action,
+    ansi="",
+    include_id=False,
+    end_new_line=False,
+    start_new_line=False,
+):
     """
     decorator to print time taken to run function
 
-    takes an action input that describes task of function being done
+    :param action: describes function action
+    :type action: string
+    :param include_id: whether to inlude id param of function (first param)
+    :type include_id: bool
+    :param end_new_line: whether to print a new line after elapsed time
+    :type end_new_line: bool
+    :param start_new_line: whether to print a new line after action
+    :type start_new_line: bool
     """
 
     def wrap(f):
         @wraps(f)
         def wrapped_f(*args, **kwargs):
-            endline = "\n" if end_line else ""
+            startline = "\n" if start_new_line else ""
+            endline = "\n" if end_new_line else ""
             id = f" {args[1]}" if include_id else ""
-            print(f"{action}{id}")
+            print(f"[INFO] {ansi}{action}{id}{startline}{bcolors.RESET}")
             start_time = time.perf_counter()
             res = f(*args, **kwargs)
             elapsed = time.perf_counter() - start_time
             print(
-                f"Done {action[0].lower()}{action[1:]}{id}!"
-                f" Took {round(elapsed, 4)} seconds{endline}"
+                f"[INFO] {ansi}Done {action[0].lower()}"
+                f"{action[1:]}{id}!{bcolors.RESET} Took {round(elapsed, 4)} "
+                f"seconds{endline}"
             )
             return res
 
@@ -49,6 +89,7 @@ class Looper:
         self.color_diff = color_diff
         self.DOWNSAMPLE_FACTOR = 0.25
         self.get_frame_pixel_diff = None
+        self.corrupted = False
         if self.gray:
             self.get_frame_pixel_diff = self.get_frame_pixel_diff_gray
         else:
@@ -58,23 +99,34 @@ class Looper:
                 self.get_frame_pixel_diff = self.get_frame_pixel_diff_color_redmean
 
         print(
-            "Initializing loop calculations...\n"
-            f"Minimum loop duration: {self.min_duration}\n"
-            f"Maximum loop duration: {self.max_duration}\n"
-            f"Grayscale mode: {'Active' if self.gray else 'Disabled'}\n"
-            f"Color difference method: {'Basic diff' if self.gray else 'Redmean' if self.color_diff == 'redmean' else 'CIE 2000'}\n"
-            f"Source file: {self.src}\n"
+            f"[INFO] {bcolors.BOLD}{bcolors.HEADER}Initializing loop calculations...\n{bcolors.RESET}"
+            f"[INFO] {bcolors.OKGREEN}Minimum loop duration: {self.min_duration}\n{bcolors.RESET}"
+            f"[INFO] {bcolors.OKGREEN}Maximum loop duration: {self.max_duration}\n{bcolors.RESET}"
+            f"[INFO] {bcolors.OKGREEN}Grayscale mode: {'Active' if self.gray else 'Disabled'}\n{bcolors.RESET}"
+            f"[INFO] {bcolors.OKGREEN}Color difference method: {'Basic diff' if self.gray else 'Redmean' if self.color_diff == 'redmean' else 'CIE 2000'}\n{bcolors.RESET}"
+            f"[INFO] {bcolors.OKGREEN}Source file: {self.src}\n{bcolors.RESET}"
         )
 
+    @timeit(
+        "Finding loop",
+        start_new_line=True,
+        ansi=f"{bcolors.BOLD}{bcolors.UNDERLINE}{bcolors.HEADER}",
+    )
     def Start(self):
-        self.read_video()
-        cv.destroyAllWindows()
-        self.get_all_frame_diffs()
-        self.get_best_loop()
-        self.write_best_loop()
-        return
+        """starts looper on video to get best start/end frames and write gif"""
+        try:
+            self.read_video()
+            self.get_all_frame_diffs()
+            self.get_best_loop()
+            self.write_best_loop()
+        except cv.error:
+            print_exception("[OpenCV Error]")
+        except Exception:
+            print_exception("[Error]")
 
-    @timeit("Reading video file", end_line=True)
+    @timeit(
+        "Reading video file", ansi=f"{bcolors.BOLD}{bcolors.HEADER}", end_new_line=True
+    )
     def read_video(self):
         """
         reads video frames and stores each color frame in self.frame_buf_c
@@ -83,93 +135,145 @@ class Looper:
         video that is needed later. All frames are downsampled by a factor
         of .25 using cubic interpolation.
         """
+        try:
+            cap = cv.VideoCapture(self.src)
 
-        cap = cv.VideoCapture(self.src)
-
-        # read first frame for optical flow calcs + frame size/count
-        fc = 0
-        ret, frame = cap.read()
-        prev = cv.resize(
-            frame,
-            None,
-            fx=self.DOWNSAMPLE_FACTOR,
-            fy=self.DOWNSAMPLE_FACTOR,
-            interpolation=cv.INTER_CUBIC,
-        )
-        prev = cv.cvtColor(prev, cv.COLOR_BGR2RGB)
-        prev_gray = cv.cvtColor(prev, cv.COLOR_RGB2GRAY)
-
-        self.frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
-        self.fps = int(cap.get(cv.CAP_PROP_FPS))
-        self.frame_width = prev.shape[1]
-        self.frame_height = prev.shape[0]
-        print(
-            "Video Data:\n"
-            f"Frame count: {self.frame_count}\n"
-            f"FPS: {self.fps}\n"
-            f"Frame Width: {self.frame_width}\n"
-            f"Frame Height: {self.frame_height}"
-        )
-
-        self.frame_buf_c = np.empty(
-            (self.frame_count, *prev.shape), np.dtype("float32")
-        )
-        self.frame_buf_g = np.empty(
-            (self.frame_count, *prev_gray.shape), np.dtype("float32")
-        )
-        self.flow_buf = np.empty(
-            (self.frame_count, self.frame_height, self.frame_width, 2),
-            np.dtype("float32"),
-        )
-
-        self.frame_buf_c[fc] = prev
-        self.frame_buf_g[fc] = prev_gray
-        fc += 1
-
-        while fc < self.frame_count and ret:
+            # read first frame for optical flow calcs + frame size/count
+            fc = 0
             ret, frame = cap.read()
-            curr = cv.resize(
+
+            if not ret:
+                raise Exception("Video file cannot be read")
+
+            frame = cv.resize(
                 frame,
                 None,
                 fx=self.DOWNSAMPLE_FACTOR,
                 fy=self.DOWNSAMPLE_FACTOR,
                 interpolation=cv.INTER_CUBIC,
             )
-            curr = cv.cvtColor(curr, cv.COLOR_BGR2RGB)
-            curr_gray = cv.cvtColor(curr, cv.COLOR_RGB2GRAY)
-            self.frame_buf_c[fc] = curr
-            self.frame_buf_g[fc] = curr_gray
+            prev = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+            prev_gray = cv.cvtColor(prev, cv.COLOR_RGB2GRAY)
 
-            # calc optical flow
-            flow = cv.calcOpticalFlowFarneback(
-                self.frame_buf_g[fc - 1],
-                self.frame_buf_g[fc],
-                None,
-                0.5,
-                3,
-                15,
-                3,
-                5,
-                1.2,
-                0,
+            supposed_frame_count = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
+            supposed_fps = int(cap.get(cv.CAP_PROP_FPS))
+
+            frame_buf_c = [prev]
+            frame_buf_g = [prev_gray]
+            flow_buf = []
+            fc = 1
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    if fc != supposed_frame_count:
+                        self.corrupted = True
+                    break
+
+                frame = cv.resize(
+                    frame,
+                    None,
+                    fx=self.DOWNSAMPLE_FACTOR,
+                    fy=self.DOWNSAMPLE_FACTOR,
+                    interpolation=cv.INTER_CUBIC,
+                )
+                curr = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+                curr_gray = cv.cvtColor(curr, cv.COLOR_RGB2GRAY)
+                frame_buf_c.append(curr)
+                frame_buf_g.append(curr_gray)
+
+                # calc optical flow
+                flow = cv.calcOpticalFlowFarneback(
+                    frame_buf_g[fc - 1],
+                    frame_buf_g[fc],
+                    None,
+                    0.5,
+                    3,
+                    15,
+                    3,
+                    5,
+                    1.2,
+                    0,
+                )
+                flow_buf.append(flow)
+                fc += 1
+
+                # cv.imshow("flow", self.draw_flow(gray, flow))
+
+                ch = cv.waitKey(5)
+                if ch == 27:
+                    break
+
+            cap.release()
+            # cv.destroyAllWindows()
+
+            if self.corrupted:
+                self.frame_count = fc
+                get_duration_cmd = f"ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 {self.src}"
+                ffprobe_out = subprocess.run(
+                    get_duration_cmd, capture_output=True, shell=True, text=True
+                )
+                if ffprobe_out.returncode == 1:
+                    raise Exception("Not able to read duration of video using ffprobe")
+                duration = float(ffprobe_out.stdout)
+                self.fps = fc / duration
+                self.duration = duration
+            else:
+                self.frame_count = supposed_frame_count
+                self.fps = supposed_fps
+
+            self.frame_width = frame_buf_c[0].shape[1]
+            self.frame_height = frame_buf_c[0].shape[0]
+
+            loop_dur_invalid = False
+            if self.duration < self.max_duration:
+                loop_dur_invalid = True
+                self.max_duration = self.duration
+            if self.duration < self.min_duration:
+                self.min_duration = self.duration / 2
+
+            if self.corrupted:
+                print(
+                    f"[WARNING] {bcolors.WARNING}Video Corrupted! Will attempt to make things work.{bcolors.RESET}"
+                )
+
+            if loop_dur_invalid:
+                print(
+                    f"[WARNING] {bcolors.WARNING}Specified loop durations invalid!\n{bcolors.RESET}"
+                    f"[WARNING] {bcolors.WARNING}Adjusting loop durations to:\n{bcolors.RESET}"
+                    f"[WARNING] {bcolors.WARNING}Minimum loop duration: {self.min_duration}s\n{bcolors.RESET}"
+                    f"[WARNING] {bcolors.WARNING}Maximum loop duration: {self.max_duration}s{bcolors.RESET}"
+                )
+            print(f"[INFO] {bcolors.OKBLUE}Video Data{bcolors.RESET}")
+            print(
+                f"[INFO] Frame count: {self.frame_count}\n"
+                f"[INFO] FPS: {self.fps}\n"
+                f"[INFO] Duration: {self.duration}\n"
+                f"[INFO] Frame Width: {self.frame_width}\n"
+                f"[INFO] Frame Height: {self.frame_height}"
             )
-            self.flow_buf[fc] = flow
-            fc += 1
 
-            # cv.imshow("flow", self.draw_flow(gray, flow))
+            self.frame_buf_c = np.array(frame_buf_c).astype(np.float32)
+            self.frame_buf_g = np.array(frame_buf_g).astype(np.float32)
+            self.flow_buf = np.array(flow_buf).astype(np.float32)
 
-            ch = cv.waitKey(5)
-            if ch == 27:
-                break
+        except cv.error as e:
+            raise e
+        except Exception as e:
+            raise e
 
-        cap.release()
-
-    @timeit("Calculating best loop frames")
+    @timeit(
+        "Calculating best loop frames",
+        ansi=f"{bcolors.BOLD}{bcolors.HEADER}",
+        end_new_line=True,
+    )
     def get_best_loop(self):
-        best_per_fc = [(float("infinity"), -1, -1)] * (self.fps * self.max_duration + 1)
+        best_per_fc = [(float("infinity"), -1, -1)] * (
+            math.ceil(self.fps * self.max_duration) + 1
+        )
         for f1, f1_diffs in enumerate(self.frame_diffs):
             for f2, diff in enumerate(f1_diffs):
-                if not diff:
+                if diff == -1:
                     continue
                 fc = f2 - f1 + 1
                 if diff < best_per_fc[fc][0]:
@@ -178,15 +282,20 @@ class Looper:
         best_overall = (float("infinity"), -1, -1)
         for i, diff in enumerate(best_per_fc):
             if diff[0] != float("infinity"):
-                print(f"fc: {i} | diff: {diff}")
+                print(f"[INFO] fc: {i} | diff: {diff}")
                 if diff[0] < best_overall[0]:
                     best_overall = diff
 
-        print(f"best overall: {best_overall}")
+        print(f"[INFO] best overall: {best_overall}")
 
         self.best_start = best_overall[1]
         self.best_end = best_overall[2]
 
+    @timeit(
+        "Writing frames to gif",
+        ansi=f"{bcolors.BOLD}{bcolors.HEADER}",
+        end_new_line=True,
+    )
     def write_best_loop(self):
         """
         writes gif to project dir of best loop found
@@ -196,26 +305,37 @@ class Looper:
         tmp_dir = "./tmp_images"
         if os.path.exists(tmp_dir) and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir)
-        if os.path.exists("./output.gif"):
-            os.remove("./output.gif")
         os.makedirs(tmp_dir)
 
         # writes frames to tmp dir and saves paths
-        # TODO: just read from actual video to get full res frames
+        cap = cv.VideoCapture(self.src)
+        fc = 0
         image_paths = []
-        for i in range(self.best_start, self.best_end + 1):
-            output_filename = str(i)
-            while len(output_filename) < 3:
-                output_filename = "0" + output_filename
-            output_filename += ".png"
-            im_path = os.path.join(tmp_dir, output_filename)
-            image_paths.append(im_path)
-            cv.imwrite(im_path, self.frame_buf_c[i])
+        while True:
+            ret, frame = cap.read()
+
+            if not ret:
+                break
+
+            if fc >= self.best_start and fc <= self.best_end:
+                output_filename = f"0{fc}.png"
+                im_path = os.path.join(tmp_dir, output_filename)
+                print(f"[INFO] writing frame ({fc}) to path ({im_path})")
+                image_paths.append(im_path)
+                cv.imwrite(im_path, frame)
+
+            fc += 1
 
         # use imagemagick to create gif from frames
         delay = 1 / self.fps
         loop = 0
-        output_path = "./output.gif"
+        output_name_base = "output"
+        output_name = output_name_base
+        i = 1
+        while os.path.exists(f"./{output_name}.gif"):
+            output_name = f"{output_name_base}{i}"
+            i += 1
+        output_path = f"./{output_name}.gif"
         cmd = (
             f"convert -delay {delay} {' '.join(image_paths)} -loop {loop} {output_path}"
         )
@@ -225,7 +345,11 @@ class Looper:
         if os.path.exists(tmp_dir) and os.path.isdir(tmp_dir):
             shutil.rmtree(tmp_dir)
 
-    @timeit("Getting all frame pixel diffs")
+    @timeit(
+        "Getting all frame pixel diffs",
+        ansi=f"{bcolors.BOLD}{bcolors.HEADER}",
+        end_new_line=True,
+    )
     def get_all_frame_diffs(self):
         """
         calculates all frame pixel differences for valid frames to be
@@ -234,16 +358,13 @@ class Looper:
         returns array where frame_diffs[i] = [avg_diff(i,0),...,avg_diff(i,n)]
         """
         self.frame_diffs = []
-
-        last_frame_eligible = self.frame_count - (self.fps * self.min_duration)
-        pool = multiprocessing.Pool()
-        res = pool.map(self.get_frame_diffs, list(range(last_frame_eligible + 1)))
-
-        for diff in res:
-            self.frame_diffs.append(diff)
+        last_frame_eligible = self.frame_count - math.ceil(self.fps * self.min_duration)
+        for i in range(last_frame_eligible + 1):
+            self.frame_diffs.append(self.get_frame_diffs(i))
 
     @timeit(
         "Getting pixel diffs for frame",
+        # ansi=f"{bcolors.BOLD}{bcolors.HEADER}",
         include_id=True,
     )
     def get_frame_diffs(self, idx):
@@ -256,8 +377,8 @@ class Looper:
         """
         diffs = [-1] * self.frame_count
 
-        first_frame_eligible = idx + (self.fps * self.min_duration) - 1
-        last_frame_eligible = idx + (self.fps * self.max_duration) - 1
+        first_frame_eligible = idx + math.ceil(self.fps * self.min_duration) - 1
+        last_frame_eligible = idx + math.ceil(self.fps * self.max_duration) - 1
         last_frame_eligible = min(last_frame_eligible, self.frame_count - 1)
         for i in range(first_frame_eligible, last_frame_eligible + 1):
             diffs[i] = self.get_frame_pixel_diff(idx, i)
