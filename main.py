@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 import looper
 
@@ -56,7 +57,7 @@ def parse_args():
     min_d = args.min_duration
     max_d = args.max_duration
     gray = args.grayscale
-    color_diff = args.colordifference
+    color_diff = args.colordifference if not gray else ""
 
     if not os.path.isfile(src):
         raise FileNotFoundError("file not found, check source")
